@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -256,6 +257,18 @@ func (r *Recipe) ToMarkdown() string {
 		sb.WriteString("\n")
 	}
 
+	if r.NutritionalInfo != "" {
+		sb.WriteString("## Nutritional Info\n")
+		normalized := strings.ReplaceAll(strings.TrimSpace(r.NutritionalInfo), "|", "\n")
+		for _, line := range strings.Split(normalized, "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" {
+				sb.WriteString(fmt.Sprintf("- %s\n", line))
+			}
+		}
+		sb.WriteString("\n")
+	}
+
 	if r.Ingredients != "" {
 		sb.WriteString("## Ingredients\n")
 		for _, line := range strings.Split(strings.TrimSpace(r.Ingredients), "\n") {
@@ -283,6 +296,71 @@ func (r *Recipe) ToMarkdown() string {
 	}
 
 	return sb.String()
+}
+
+var macroLeadingValue = regexp.MustCompile(`^\s*([0-9]+(?:\.[0-9]+)?\s*[a-zA-Z]*)`)
+
+// Macros extracts a compact calories/protein/carbs/fat summary from the
+// recipe's free-form NutritionalInfo text. Paprika stores whatever the user
+// pasted in (often copied from a recipe site), so the format varies -
+// "Calories: 313kcal | Protein: 15g | ...", newline-separated, or
+// comma-separated on one line. Fields not found are simply omitted.
+func (r *Recipe) Macros() string {
+	if r.NutritionalInfo == "" {
+		return ""
+	}
+
+	var calories, protein, carbs, fat string
+
+	normalized := strings.ReplaceAll(r.NutritionalInfo, "|", "\n")
+	for _, line := range strings.Split(normalized, "\n") {
+		tokens := []string{line}
+		if strings.Count(line, ":") > 1 {
+			tokens = strings.Split(line, ",")
+		}
+		for _, token := range tokens {
+			idx := strings.Index(token, ":")
+			if idx < 0 {
+				continue
+			}
+			key := strings.ToLower(strings.TrimSpace(token[:idx]))
+			value := strings.TrimSpace(macroLeadingValue.FindString(token[idx+1:]))
+			if value == "" {
+				continue
+			}
+
+			switch {
+			case calories == "" && strings.Contains(key, "calor"):
+				calories = value
+			case protein == "" && strings.Contains(key, "protein"):
+				protein = value
+			case carbs == "" && strings.Contains(key, "carb"):
+				carbs = value
+			case fat == "" && strings.Contains(key, "fat") &&
+				!strings.Contains(key, "saturated") &&
+				!strings.Contains(key, "trans") &&
+				!strings.Contains(key, "poly") &&
+				!strings.Contains(key, "mono"):
+				fat = value
+			}
+		}
+	}
+
+	var parts []string
+	if calories != "" {
+		parts = append(parts, fmt.Sprintf("Calories: %s", calories))
+	}
+	if protein != "" {
+		parts = append(parts, fmt.Sprintf("Protein: %s", protein))
+	}
+	if carbs != "" {
+		parts = append(parts, fmt.Sprintf("Carbs: %s", carbs))
+	}
+	if fat != "" {
+		parts = append(parts, fmt.Sprintf("Fat: %s", fat))
+	}
+
+	return strings.Join(parts, ", ")
 }
 
 func (r *Recipe) generateUUID() {

@@ -340,6 +340,9 @@ func (s *Server) listRecipes(ctx context.Context, req mcp.CallToolRequest) (*mcp
 		if len(r.Categories) > 0 {
 			sb.WriteString(fmt.Sprintf(" - categories: %s", strings.Join(r.Categories, ", ")))
 		}
+		if macros := r.Macros(); macros != "" {
+			sb.WriteString(fmt.Sprintf(" - %s", macros))
+		}
 		sb.WriteString("\n")
 	}
 
