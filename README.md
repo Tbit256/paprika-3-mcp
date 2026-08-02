@@ -1,6 +1,6 @@
 # paprika-3-mcp
 
-A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/introduction) server that exposes your **Paprika 3** recipes as LLM-readable resources — and lets an LLM like Claude create or update recipes in your Paprika app.
+A [Model Context Protocol (MCP)](https://modelcontextprotocol.io/introduction) server that exposes your **Paprika 3** recipes as LLM-readable resources — and lets an LLM like Claude create, update, list, and look up recipes (including nutritional info) in your Paprika app. Handy for meal planning and building grocery lists straight from your saved recipes.
 
 ### 🖼️ Example: Claude using the Paprika MCP server
 
@@ -14,7 +14,7 @@ See anything missing? Open an issue on this repo to request a feature!
 
 #### 📄 **Resources**
 
-- Recipes ✅
+- Recipes ✅ (including nutritional info, when present in Paprika)
 - Recipe Photos 🚧
 
 #### 🛠 **Tools**
@@ -23,6 +23,10 @@ See anything missing? Open an issue on this repo to request a feature!
   Allows Claude to save a new recipe to your Paprika app
 - `update_paprika_recipe`  
   Allows Claude to modify an existing recipe
+- `list_paprika_recipes`  
+  Lists your recipes by name, uid, and categories, with an optional text filter. Recipes that have nutritional info in Paprika also show a quick calories/protein/carbs/fat summary — handy for browsing before meal planning or building a grocery list.
+- `get_paprika_recipe`  
+  Fetches the full details of a single recipe — ingredients, directions, servings, prep/cook time, notes, and full nutritional info — by uid, or by name (fuzzy-matched against your recipe list)
 
 ## ⚙️ Prerequisites
 
