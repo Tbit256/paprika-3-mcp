@@ -5,6 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -31,6 +34,7 @@ func NewServer(opts NewServerOptions) (*Server, error) {
 		paprika3: paprika3,
 		server:   s,
 		logger:   opts.Logger,
+		cache:    make(map[string]*paprika.Recipe),
 	}, nil
 }
 
@@ -38,6 +42,9 @@ type Server struct {
 	paprika3 *paprika.Client
 	logger   *slog.Logger
 	server   *server.MCPServer
+
+	cacheMu sync.RWMutex
+	cache   map[string]*paprika.Recipe
 }
 
 func (s *Server) Start() {
@@ -68,12 +75,27 @@ func (s *Server) Start() {
 		mcp.WithString("cook_time", mcp.Description("The cook time for the recipe"), mcp.Required()),
 		mcp.WithString("difficulty", mcp.Description("The difficulty of the recipe"), mcp.Required()),
 	)
+	listRecipesTool := mcp.NewTool("list_paprika_recipes",
+		mcp.WithDescription("List recipes saved in the Paprika 3 app (name, uid, and categories only - use get_paprika_recipe for full details like ingredients and directions). Useful for browsing what's available before meal planning or building a grocery list."),
+		mcp.WithString("query", mcp.Description("Optional case-insensitive filter - only recipes whose name or categories contain this text are returned. Omit to list everything.")),
+	)
+	getRecipeTool := mcp.NewTool("get_paprika_recipe",
+		mcp.WithDescription("Get the full details of a single recipe from the Paprika 3 app, including ingredients, directions, servings, and prep/cook time. Use list_paprika_recipes first to find the uid, or pass name to look it up by exact or partial name match."),
+		mcp.WithString("uid", mcp.Description("The UID of the recipe, as returned by list_paprika_recipes")),
+		mcp.WithString("name", mcp.Description("The name of the recipe to look up, if the uid is not known. Matches case-insensitively; must match exactly one recipe.")),
+	)
 	s.server.AddTools(server.ServerTool{
 		Tool:    createRecipeTool,
 		Handler: s.createRecipe,
 	}, server.ServerTool{
 		Tool:    updateRecipeTool,
 		Handler: s.updateRecipe,
+	}, server.ServerTool{
+		Tool:    listRecipesTool,
+		Handler: s.listRecipes,
+	}, server.ServerTool{
+		Tool:    getRecipeTool,
+		Handler: s.getRecipe,
 	})
 
 	if err := server.ServeStdio(s.server); err != nil {
@@ -124,8 +146,15 @@ func (s *Server) addRecipeResource(uid string) error {
 	}
 
 	if recipe.InTrash {
+		s.cacheMu.Lock()
+		delete(s.cache, recipe.UID)
+		s.cacheMu.Unlock()
 		return nil
 	}
+
+	s.cacheMu.Lock()
+	s.cache[recipe.UID] = recipe
+	s.cacheMu.Unlock()
 
 	resourceContents := mcp.TextResourceContents{
 		URI:      fmt.Sprintf("paprika://recipes/%s", recipe.UID),
@@ -275,6 +304,93 @@ func (s *Server) updateRecipe(ctx context.Context, req mcp.CallToolRequest) (*mc
 
 	duration := time.Since(start)
 	s.logger.Info("Updated recipe", "name", recipe.Name, "uid", recipe.UID, "duration", duration)
+
+	return mcp.NewToolResultResource(recipe.Name, mcp.TextResourceContents{
+		URI:      fmt.Sprintf("paprika://recipes/%s", recipe.UID),
+		MIMEType: "text/markdown",
+		Text:     recipe.ToMarkdown(),
+	}), nil
+}
+
+func (s *Server) listRecipes(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	query := strings.ToLower(strings.TrimSpace(fmt.Sprintf("%v", req.Params.Arguments["query"])))
+	if query == "<nil>" {
+		query = ""
+	}
+
+	s.cacheMu.RLock()
+	recipes := make([]*paprika.Recipe, 0, len(s.cache))
+	for _, r := range s.cache {
+		recipes = append(recipes, r)
+	}
+	s.cacheMu.RUnlock()
+
+	sort.Slice(recipes, func(i, j int) bool {
+		return strings.ToLower(recipes[i].Name) < strings.ToLower(recipes[j].Name)
+	})
+
+	var sb strings.Builder
+	count := 0
+	for _, r := range recipes {
+		if query != "" && !strings.Contains(strings.ToLower(r.Name), query) && !strings.Contains(strings.ToLower(strings.Join(r.Categories, " ")), query) {
+			continue
+		}
+		count++
+		sb.WriteString(fmt.Sprintf("- **%s** (uid: %s)", r.Name, r.UID))
+		if len(r.Categories) > 0 {
+			sb.WriteString(fmt.Sprintf(" - categories: %s", strings.Join(r.Categories, ", ")))
+		}
+		sb.WriteString("\n")
+	}
+
+	if count == 0 {
+		return mcp.NewToolResultText("No recipes found matching that query."), nil
+	}
+
+	return mcp.NewToolResultText(fmt.Sprintf("Found %d recipe(s):\n\n%s", count, sb.String())), nil
+}
+
+func (s *Server) getRecipe(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	uid, _ := req.Params.Arguments["uid"].(string)
+	name, _ := req.Params.Arguments["name"].(string)
+
+	if uid == "" && name == "" {
+		return nil, errors.New("either uid or name is required")
+	}
+
+	if uid == "" {
+		s.cacheMu.RLock()
+		var matches []*paprika.Recipe
+		for _, r := range s.cache {
+			if strings.EqualFold(r.Name, name) || strings.Contains(strings.ToLower(r.Name), strings.ToLower(name)) {
+				matches = append(matches, r)
+			}
+		}
+		s.cacheMu.RUnlock()
+
+		if len(matches) == 0 {
+			return mcp.NewToolResultText(fmt.Sprintf("No recipe found matching name %q. Try list_paprika_recipes to see available recipes.", name)), nil
+		}
+		if len(matches) > 1 {
+			var sb strings.Builder
+			for _, r := range matches {
+				sb.WriteString(fmt.Sprintf("- **%s** (uid: %s)\n", r.Name, r.UID))
+			}
+			return mcp.NewToolResultText(fmt.Sprintf("Multiple recipes match %q, please retry with a specific uid:\n\n%s", name, sb.String())), nil
+		}
+		uid = matches[0].UID
+	}
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	recipe, err := s.paprika3.GetRecipe(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+
+	duration := time.Since(start)
+	s.logger.Info("Fetched recipe", "name", recipe.Name, "uid", recipe.UID, "duration", duration)
 
 	return mcp.NewToolResultResource(recipe.Name, mcp.TextResourceContents{
 		URI:      fmt.Sprintf("paprika://recipes/%s", recipe.UID),
